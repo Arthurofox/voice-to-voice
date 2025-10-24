@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import time
 from dataclasses import dataclass
@@ -21,6 +20,8 @@ class AudioTranslationResult:
     detected_source_language: Optional[str]
     voice: str
     model: str
+    transcription_text: str
+    translated_text: str
 
 
 class AudioTranslator:
@@ -29,13 +30,17 @@ class AudioTranslator:
     def __init__(
         self,
         api_key: str,
-        default_model: str,
+        translation_model: str,
         default_voice: str,
+        transcription_model: Optional[str] = None,
+        tts_model: Optional[str] = None,
         timeout: float = 60.0,
     ) -> None:
         self.client = OpenAI(api_key=api_key, timeout=timeout)
-        self.default_model = default_model
+        self.translation_model = translation_model
         self.default_voice = default_voice
+        self.transcription_model = transcription_model or "gpt-4o-mini-transcribe"
+        self.tts_model = tts_model or "gpt-4o-mini-tts"
 
     async def translate_audio(
         self,
@@ -50,98 +55,74 @@ class AudioTranslator:
             raise ValueError("Audio payload is empty.")
 
         voice_id = voice or self.default_voice
-        model_name = self.default_model
+        translation_model = self.translation_model
 
-        # Encode audio for the API. The Responses API expects base64 input in streaming scenarios.
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        timings = {"received_at": time.time()}
 
-        system_prompt = (
-            "You are a bilingual interpreter. Return only translated speech audio. "
-            f"Translate input from {source_lang.upper()} to {target_lang.upper()}. "
-            "Preserve intent and natural phrasing. No explanations."
+        # Stage 1: transcription
+        pipeline_start = time.perf_counter()
+        transcription_start = pipeline_start
+        transcription = await asyncio.to_thread(
+            self.client.audio.transcriptions.create,
+            model=self.transcription_model,
+            file=(filename, audio_bytes, "audio/wav"),
+            language=source_lang,
         )
+        transcription_elapsed = (time.perf_counter() - transcription_start) * 1000
+        timings["transcription_duration_ms"] = transcription_elapsed
 
-        user_payload = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "audio": {
-                            "data": audio_b64,
-                            "format": "wav",
-                        },
-                    }
-                ],
-            },
-        ]
+        transcript_text = getattr(transcription, "text", None) or ""
+        detected_language = getattr(transcription, "language", None)
+        if not transcript_text.strip():
+            raise RuntimeError("Transcription returned empty text.")
 
-        timings = {
-            "received_at": time.time(),
-            "request_duration_ms": None,
-            "first_byte_delta_ms": None,
-            "total_latency_ms": None,
-        }
-
-        request_start = time.perf_counter()
-
-        response = await asyncio.to_thread(
+        # Stage 2: translation (text→text)
+        translation_prompt = (
+            f"Translate the following speech from {source_lang.upper()} to {target_lang.upper()}.\n"
+            "Return only the translated text with natural phrasing."
+        )
+        translation_start = time.perf_counter()
+        translation_response = await asyncio.to_thread(
             self.client.responses.create,
-            model=model_name,
-            modalities=["text", "audio"],
-            audio={"voice": voice_id, "format": "wav"},
-            input=user_payload,
+            model=translation_model,
+            instructions=translation_prompt,
+            input=transcript_text,
         )
+        translation_elapsed = (time.perf_counter() - translation_start) * 1000
+        timings["translation_duration_ms"] = translation_elapsed
 
-        request_elapsed_ms = (time.perf_counter() - request_start) * 1000
+        translated_text = translation_response.output_text().strip()
+        if not translated_text:
+            raise RuntimeError("Translation response did not include text output.")
 
-        timings["request_duration_ms"] = request_elapsed_ms
-        timings["total_latency_ms"] = request_elapsed_ms
-
-        audio_content = self._extract_audio_from_response(response)
-        detected_language = self._extract_detected_language(response)
-
-        logger.debug(
-            "Audio translation response meta: detected_language=%s model=%s voice=%s",
-            detected_language,
-            model_name,
-            voice_id,
+        # Stage 3: TTS
+        tts_start = time.perf_counter()
+        speech_response = await asyncio.to_thread(
+            self.client.audio.speech.create,
+            model=self.tts_model,
+            voice=voice_id,
+            input=translated_text,
+            response_format="wav",
         )
+        audio_content = speech_response.read()
+        tts_elapsed = (time.perf_counter() - tts_start) * 1000
+        timings["tts_duration_ms"] = tts_elapsed
+        timings["total_latency_ms"] = (time.perf_counter() - pipeline_start) * 1000
 
         return AudioTranslationResult(
             audio_bytes=audio_content,
             audio_format="wav",
             timing=timings,
-            detected_source_language=detected_language,
+            detected_source_language=detected_language or source_lang,
             voice=voice_id,
-            model=model_name,
+            model=translation_model,
+            transcription_text=transcript_text,
+            translated_text=translated_text,
         )
 
     @staticmethod
-    def _extract_audio_from_response(response: object) -> bytes:
-        """Navigate the Responses object and retrieve the primary audio payload."""
-        # The OpenAI client currently returns a pydantic-like object. We keep it flexible.
-        try:
-            for item in response.output:  # type: ignore[attr-defined]
-                if getattr(item, "type", None) == "output_audio":
-                    data = item.audio.data  # type: ignore[attr-defined]
-                    return base64.b64decode(data)
-                if getattr(item, "type", None) == "message":
-                    for content in getattr(item, "content", []):
-                        if getattr(content, "type", None) == "audio":
-                            return base64.b64decode(content.audio.data)  # type: ignore[attr-defined]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to parse audio from response: %s", exc)
-
-        raise RuntimeError("Audio output not found in response.")
-
-    @staticmethod
     def _extract_detected_language(response: object) -> Optional[str]:
-        """Best-effort extraction of model metadata such as detected language."""
+        """Retained for compatibility; currently unused."""
         try:
             usage = getattr(response, "metadata", None) or {}
             if isinstance(usage, dict):

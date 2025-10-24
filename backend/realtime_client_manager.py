@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 REALTIME_BASE_URL = "https://api.openai.com/v1/realtime/sessions"
 
+MODEL_TRANSPORT_MAP = {
+    "gpt-realtime": "webrtc",
+    "gpt-4o-realtime-preview": "webrtc",
+    "gpt-4o-mini-realtime-preview": "websocket",
+    "gpt-4o-realtime-mini": "websocket",
+}
+
 
 @dataclasses.dataclass
 class RealtimeSessionConfig:
@@ -25,6 +32,7 @@ class RealtimeSessionConfig:
     input_audio_format: str = "pcm16"
     output_audio_format: str = "pcm16"
     vad: bool = True
+    transport: str = "webrtc"
 
 
 class RealtimeClientManager:
@@ -44,13 +52,25 @@ class RealtimeClientManager:
 
     def create_session_token(self, session: RealtimeSessionConfig) -> Dict[str, str]:
         """Create a short-lived client token using OpenAI's Realtime Sessions endpoint."""
+        transport = session.transport or "webrtc"
+        voice = session.voice or self.default_voice
+        instruction = self._build_system_instruction(session.source_lang, session.target_lang)
+
+        if transport == "websocket":
+            # WebSocket flow uses the server-side relay; we just return the payload metadata.
+            return {
+                "client_secret": None,
+                "expires_at": None,
+                "model": session.model,
+                "voice": voice,
+                "instructions": instruction,
+                "transport": transport,
+            }
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
-        voice = session.voice or self.default_voice
-        instruction = self._build_system_instruction(session.source_lang, session.target_lang)
 
         body = {
             "model": session.model,
@@ -83,6 +103,7 @@ class RealtimeClientManager:
             "instructions": instruction,
             "url": payload.get("url"),
             "created_at": payload.get("created_at", int(time.time())),
+            "transport": transport,
         }
 
         missing = [k for k, v in token_data.items() if v is None]
@@ -94,10 +115,27 @@ class RealtimeClientManager:
     @staticmethod
     def _build_system_instruction(source_lang: str, target_lang: str) -> str:
         return (
-            "You are a concise interpreter. Translate everything you hear from "
-            f"{source_lang.upper()} into {target_lang.upper()}.\n"
-            "Preserve tone and timing. Do not add commentary or greetings."
+            "You are an exact speech relay. When the user finishes speaking, repeat the same sentence in "
+            f"{target_lang.upper()} without adding or removing any meaning.\n"
+            "Do not introduce greetings, apologies, explanations, or filler. Preserve the user's tone and sentence boundaries."
         )
 
     def default_model_for(self, variant: str) -> str:
-        return self.default_models.get(variant) or os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview")
+        return self.default_models.get(variant) or os.getenv("REALTIME_MODEL", "gpt-realtime")
+
+    def resolve_transport(self, model: str, fallback: str = "webrtc") -> str:
+        normalized = (model or "").strip().lower()
+        return MODEL_TRANSPORT_MAP.get(normalized, fallback)
+
+    def build_session_update(self, session: RealtimeSessionConfig) -> Dict[str, object]:
+        """Construct the session.update payload shared by WebRTC and WebSocket flows."""
+        return {
+            "type": "session.update",
+            "session": {
+                "voice": session.voice or self.default_voice,
+                "instructions": self._build_system_instruction(session.source_lang, session.target_lang),
+                "input_audio_format": session.input_audio_format,
+                "output_audio_format": session.output_audio_format,
+                "turn_detection": {"type": "server_vad", "threshold": 0.5} if session.vad else None,
+            },
+        }

@@ -24,6 +24,21 @@ LANGUAGE_OPTIONS = {
     "FR → EN": ("fr", "en"),
 }
 
+MODE_OPTIONS = {
+    "Realtime (gpt-realtime) — WebRTC": {
+        "model": os.environ.get("REALTIME_MODEL", "gpt-realtime"),
+        "transport": "webrtc",
+    },
+    "Realtime-Mini — WebSocket": {
+        "model": os.environ.get("REALTIME_MINI_MODEL", "gpt-4o-mini-realtime-preview"),
+        "transport": "websocket",
+    },
+    "Audio (Direct)": {
+        "model": None,
+        "transport": None,
+    },
+}
+
 
 def append_log(message: str, payload: Optional[Dict[str, Any]] = None) -> None:
     logs: List[Dict[str, Any]] = st.session_state.setdefault("logs", [])
@@ -47,7 +62,14 @@ def fetch_realtime_token(model: str, source: str, target: str, voice: str) -> Di
     response = requests.get(f"{BACKEND_URL}/realtime/token", params=params, timeout=15)
     response.raise_for_status()
     token = response.json()
-    append_log("Realtime token issued", {"model": model, "expires": token.get("expires_at")})
+    append_log(
+        "Realtime token issued",
+        {
+            "model": model,
+            "transport": token.get("transport"),
+            "expires": token.get("expires_at"),
+        },
+    )
     return token
 
 
@@ -96,35 +118,44 @@ def main() -> None:
     selected_voice_label = st.selectbox("Output voice", voice_options, index=0)
     selected_voice = next(code for code, label in VOICES if label == selected_voice_label)
 
-    mode = st.radio(
-        "Mode",
-        ("Realtime (4o)", "Realtime-Mini", "Audio (Direct)"),
-        help="Select a translation path to test.",
-    )
+    mode = st.radio("Mode", tuple(MODE_OPTIONS.keys()), help="Select a translation path to test.")
+    mode_config = MODE_OPTIONS[mode]
 
-    if mode in ("Realtime (4o)", "Realtime-Mini"):
-        realtime_model = (
-            os.environ.get("REALTIME_MODEL", "gpt-4o-realtime-preview")
-            if mode == "Realtime (4o)"
-            else os.environ.get("REALTIME_MINI_MODEL", "gpt-4o-realtime-mini")
-        )
+    if mode != "Audio (Direct)":
+        realtime_model = mode_config["model"]
+        transport = mode_config["transport"]
 
-        st.markdown(
-            "1. Click **Connect** to mint an ephemeral token.\n"
-            "2. Allow microphone access when prompted.\n"
-            "3. Speak in the source language and listen for the translated reply.\n"
-            "If Opus fails, refresh and choose PCM in the realtime widget."
-        )
+        if transport == "webrtc":
+            st.markdown(
+                "1. Click **Connect (WebRTC)** to mint an ephemeral token.\n"
+                "2. Allow microphone access when prompted.\n"
+                "3. Speak in the source language and listen for the translated reply.\n"
+                "_Note_: If the browser blocks audio, refresh and retry."
+            )
+        else:
+            st.markdown(
+                "Realtime-Mini uses a **WebSocket** transport via the local relay.\n"
+                "1. Click **Connect (WebSocket)** to set up the relay.\n"
+                "2. Allow microphone access.\n"
+                "3. Use the panel controls to start/stop talking; translated audio streams back over the same socket."
+            )
+            st.info(
+                "WebRTC is not available for this model. The widget will manage fallback automatically.",
+                icon="ℹ️",
+            )
 
         token_container = st.empty()
         connect_col, disconnect_col = st.columns(2)
 
-        if connect_col.button("Connect to Realtime", type="primary"):
+        connect_label = "Connect (WebRTC)" if transport == "webrtc" else "Connect (WebSocket)"
+
+        if connect_col.button(connect_label, type="primary"):
             try:
                 token = fetch_realtime_token(realtime_model, source_lang, target_lang, selected_voice)
                 st.session_state["realtime_session"] = token
+                expires = token.get("expires_at", "soon")
                 token_container.success(
-                    f"Token ready for {realtime_model}. Expires at {token.get('expires_at', 'soon')}."
+                    f"Session ready for {realtime_model} via {transport.upper()}. Expires at {expires}."
                 )
             except requests.HTTPError as exc:
                 st.error(f"Failed to fetch token: {exc.response.text}")
@@ -137,22 +168,29 @@ def main() -> None:
             append_log("Realtime session cleared")
 
         token = st.session_state.get("realtime_session")
-        if token and token.get("client_secret"):
+        if not token:
+            st.warning("Mint a realtime token to start streaming.")
+        else:
             params = (
                 f"source={source_lang}&target={target_lang}"
-                f"&voice={selected_voice}&model={realtime_model}"
+                f"&voice={selected_voice}&model={realtime_model}&transport={transport}"
             )
-            iframe_src = f"{REALTIME_STATIC_URL}?{params}#token={token['client_secret']}"
+            fragment = ""
+            if transport == "webrtc":
+                client_secret = token.get("client_secret")
+                if not client_secret:
+                    st.error("No client secret returned for WebRTC session. Regenerate the token.")
+                    st.stop()
+                fragment = f"#token={client_secret}"
+            iframe_src = f"{REALTIME_STATIC_URL}?{params}{fragment}"
             iframe_html = (
                 f'<iframe src="{iframe_src}" width="100%" height="580" frameborder="0" '
                 'allow="microphone; autoplay; clipboard-write"></iframe>'
             )
             components.html(iframe_html, height=600)
             st.info(
-                "Keep this tab focused to reduce audio glitches. Latency stats will appear inside the realtime widget."
+                "Keep this tab focused to reduce audio glitches. Latency stats and fallbacks appear inside the panel."
             )
-        else:
-            st.warning("Mint a realtime token to start streaming.")
 
     elif mode == "Audio (Direct)":
         st.markdown(
@@ -195,14 +233,23 @@ def main() -> None:
                         f"and model `{payload.get('model')}`."
                     )
 
-                    timing = payload.get("timing", {})
-                    st.json(
-                        {
-                            "Total latency (ms)": round(timing.get("total_latency_ms", 0), 1),
-                            "Request duration (ms)": round(timing.get("request_duration_ms", 0), 1),
-                            "Detected source language": payload.get("detected_source_language"),
-                        }
+                    st.caption(
+                        f"Transcription ({payload.get('detected_source_language', source_lang).upper()}): "
+                        f"`{payload.get('transcription_text', '').strip() or '—'}`"
                     )
+                    st.caption(
+                        f"Translation ({target_lang.upper()}): "
+                        f"`{payload.get('translated_text', '').strip() or '—'}`"
+                    )
+
+                    timing = payload.get("timing", {})
+                    timing_summary = {
+                        "Transcription (ms)": round(timing.get("transcription_duration_ms", 0), 1),
+                        "Translation (ms)": round(timing.get("translation_duration_ms", 0), 1),
+                        "TTS (ms)": round(timing.get("tts_duration_ms", 0), 1),
+                        "Total latency (ms)": round(timing.get("total_latency_ms", 0), 1),
+                    }
+                    st.json(timing_summary)
                     append_log("Audio translation completed", timing)
                 except requests.HTTPError as exc:
                     st.error(f"Translation failed: {exc.response.text}")

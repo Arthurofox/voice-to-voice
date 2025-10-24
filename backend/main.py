@@ -1,20 +1,24 @@
+import asyncio
 import base64
+import json
 import logging
 import os
+import sys
 import time
 from typing import Any, Dict, Optional
-import sys
 
+import openai
+import websockets
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
+from starlette.websockets import WebSocketState
 
 from .audio_translate import AudioTranslationResult, AudioTranslator
 from .realtime_client_manager import RealtimeClientManager, RealtimeSessionConfig
-import openai
 
 
 load_dotenv()
@@ -29,10 +33,13 @@ if not OPENAI_API_KEY:
     )
 
 
-DEFAULT_REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-realtime-preview")
-DEFAULT_REALTIME_MINI_MODEL = os.getenv("REALTIME_MINI_MODEL", "gpt-4o-realtime-mini")
-DEFAULT_AUDIO_MODEL = os.getenv("AUDIO_MODEL", "gpt-4o-audio-preview")
+DEFAULT_REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-realtime")
+DEFAULT_REALTIME_MINI_MODEL = os.getenv("REALTIME_MINI_MODEL", "gpt-4o-mini-realtime-preview")
+DEFAULT_AUDIO_MODEL = os.getenv("AUDIO_MODEL", "gpt-4o-mini")
 DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "verse")
+REALTIME_TRANSPORT_MODE = os.getenv("REALTIME_TRANSPORT", "auto").lower()
+DEFAULT_TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
+DEFAULT_TTS_MODEL = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")
 
 
 def create_app() -> FastAPI:
@@ -69,15 +76,28 @@ def create_app() -> FastAPI:
 
     translator = AudioTranslator(
         api_key=OPENAI_API_KEY,
+        translation_model=DEFAULT_AUDIO_MODEL,
         default_voice=DEFAULT_VOICE,
-        default_model=DEFAULT_AUDIO_MODEL,
+        transcription_model=DEFAULT_TRANSCRIPTION_MODEL,
+        tts_model=DEFAULT_TTS_MODEL,
     )
+
+    def resolve_transport(model: str) -> str:
+        if REALTIME_TRANSPORT_MODE in {"webrtc", "websocket"}:
+            return REALTIME_TRANSPORT_MODE
+        return realtime_manager.resolve_transport(model, fallback="webrtc")
 
     @app.on_event("startup")
     async def startup_event() -> None:
         logger.info("Local Voice Translator backend starting up.")
         logger.info("Python executable: %s", sys.executable)
         logger.info("OpenAI package location: %s", getattr(openai, "__file__", "unknown"))
+        logger.info(
+            "Realtime defaults: model=%s mini_model=%s transport=%s",
+            DEFAULT_REALTIME_MODEL,
+            DEFAULT_REALTIME_MINI_MODEL,
+            resolve_transport(DEFAULT_REALTIME_MODEL),
+        )
         if "venv" not in sys.executable:
             logger.warning(
                 "Backend is not running inside a virtual environment. Activate your venv to avoid SDK mismatches."
@@ -128,20 +148,25 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         try:
             selection = model or DEFAULT_REALTIME_MODEL
-            output_format = "g711_ulaw" if selection and "mini" in selection else "pcm16"
+            transport = resolve_transport(selection)
+            output_format = "g711_ulaw" if transport == "websocket" else "pcm16"
             session_config = RealtimeSessionConfig(
                 model=selection,
                 source_lang=source_lang,
                 target_lang=target_lang,
                 voice=voice,
                 output_audio_format=output_format,
+                transport=transport,
             )
             token_payload = config.create_session_token(session_config)
+            token_payload["transport"] = transport
+            token_payload["voice"] = session_config.voice or DEFAULT_VOICE
             logger.info(
-                "Issued realtime token for model=%s source=%s target=%s",
+                "Issued realtime token for model=%s source=%s target=%s transport=%s",
                 session_config.model,
                 session_config.source_lang,
                 session_config.target_lang,
+                transport,
             )
             return token_payload
         except Exception as exc:  # noqa: BLE001
@@ -181,6 +206,8 @@ def create_app() -> FastAPI:
                 "detected_source_language": result.detected_source_language,
                 "model": result.model,
                 "voice": result.voice,
+                "transcription_text": result.transcription_text,
+                "translated_text": result.translated_text,
             }
 
             return JSONResponse(content=payload)
@@ -189,6 +216,155 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Audio translation failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/realtime/self-test")
+    async def realtime_self_test(
+        model: Optional[str] = Query(default=None, description="Model to validate"),
+        source_lang: str = Query(default="en"),
+        target_lang: str = Query(default="fr"),
+    ) -> JSONResponse:
+        selected_model = model or DEFAULT_REALTIME_MODEL
+        transport = resolve_transport(selected_model)
+        session_config = RealtimeSessionConfig(
+            model=selected_model,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            transport=transport,
+        )
+
+        if transport == "webrtc":
+            try:
+                payload = realtime_manager.create_session_token(session_config)
+                detail = {
+                    "message": "Ephemeral session minted.",
+                    "expires_at": payload.get("expires_at"),
+                }
+                return JSONResponse(
+                    content={"ok": True, "model": selected_model, "transport": transport, "detail": detail}
+                )
+            except Exception as exc:  # noqa: BLE001
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "ok": False,
+                        "model": selected_model,
+                        "transport": transport,
+                        "error": str(exc),
+                    },
+                )
+
+        upstream_headers = [
+            ("Authorization", f"Bearer {OPENAI_API_KEY}"),
+            ("OpenAI-Beta", "realtime=v1"),
+        ]
+        ws_url = f"wss://api.openai.com/v1/realtime?model={selected_model}"
+        try:
+            async with websockets.connect(
+                ws_url, extra_headers=upstream_headers, open_timeout=10, subprotocols=["realtime"]
+            ) as upstream:
+                await upstream.send(json.dumps(realtime_manager.build_session_update(session_config)))
+                return JSONResponse(
+                    content={
+                        "ok": True,
+                        "model": selected_model,
+                        "transport": transport,
+                        "detail": {"message": "WebSocket handshake ok."},
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Realtime WebSocket self-test failed")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "model": selected_model,
+                    "transport": transport,
+                    "error": str(exc),
+                },
+            )
+
+    @app.websocket("/realtime/ws-relay")
+    async def realtime_ws_relay(
+        websocket: WebSocket,
+        model: str = Query(default=DEFAULT_REALTIME_MINI_MODEL),
+        source_lang: str = Query(default="en"),
+        target_lang: str = Query(default="fr"),
+        voice: Optional[str] = Query(default=None),
+    ) -> None:
+        await websocket.accept()
+        resolved_model = model or DEFAULT_REALTIME_MINI_MODEL
+        transport = resolve_transport(resolved_model)
+        if transport != "websocket":
+            await websocket.send_json(
+                {"type": "error", "message": f"Model {resolved_model} expects transport '{transport}'."}
+            )
+            await websocket.close()
+            return
+
+        session_config = RealtimeSessionConfig(
+            model=resolved_model,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            voice=voice,
+            output_audio_format="g711_ulaw",
+            transport=transport,
+        )
+        session_update = realtime_manager.build_session_update(session_config)
+
+        upstream_headers = [
+            ("Authorization", f"Bearer {OPENAI_API_KEY}"),
+            ("OpenAI-Beta", "realtime=v1"),
+        ]
+        ws_url = f"wss://api.openai.com/v1/realtime?model={resolved_model}"
+
+        async def forward_client_to_openai(upstream: websockets.WebSocketClientProtocol) -> None:
+            try:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        await upstream.close()
+                        break
+                    data = message.get("text")
+                    if data is not None:
+                        await upstream.send(data)
+                    elif message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
+            except WebSocketDisconnect:
+                await upstream.close()
+
+        async def forward_openai_to_client(upstream: websockets.WebSocketClientProtocol) -> None:
+            try:
+                while True:
+                    data = await upstream.recv()
+                    if isinstance(data, bytes):
+                        await websocket.send_bytes(data)
+                    else:
+                        await websocket.send_text(data)
+            except websockets.exceptions.ConnectionClosed:
+                if websocket.application_state != WebSocketState.DISCONNECTED:
+                    await websocket.close()
+
+        try:
+            async with websockets.connect(
+                ws_url, extra_headers=upstream_headers, open_timeout=10, subprotocols=["realtime"]
+            ) as upstream:
+                await upstream.send(json.dumps(session_update))
+                await websocket.send_json({"type": "session.ready", "transport": transport})
+                await asyncio.gather(
+                    forward_client_to_openai(upstream),
+                    forward_openai_to_client(upstream),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Realtime WebSocket relay failed")
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                await websocket.send_json({"type": "error", "message": str(exc)})
+                await websocket.close()
+        finally:
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                try:
+                    await websocket.close()
+                except RuntimeError:
+                    pass
 
     return app
 

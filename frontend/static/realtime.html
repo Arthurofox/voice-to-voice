@@ -5,287 +5,181 @@
     <title>Realtime Translator</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      :root {
-        color-scheme: light dark;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      body {
-        margin: 0;
-        padding: 1.5rem;
-        background: #0f172a;
-        color: #f8fafc;
-      }
-      main {
-        max-width: 720px;
-        margin: 0 auto;
-        border-radius: 12px;
-        padding: 1.5rem;
-        background: rgba(15, 23, 42, 0.82);
-        border: 1px solid rgba(148, 163, 184, 0.3);
-      }
-      h1 {
-        margin-top: 0;
-        font-size: 1.6rem;
-        letter-spacing: 0.01em;
-      }
-      button {
-        padding: 0.6rem 1.4rem;
-        border-radius: 999px;
-        border: none;
-        font-weight: 600;
-        cursor: pointer;
-        margin-right: 0.5rem;
-      }
-      button[disabled] {
-        opacity: 0.4;
-        cursor: not-allowed;
-      }
-      #connect {
-        background: #22d3ee;
-        color: #0f172a;
-      }
-      #disconnect {
-        background: transparent;
-        color: #f8fafc;
-        border: 1px solid rgba(148, 163, 184, 0.5);
-      }
-      #status {
-        margin: 1rem 0;
-        font-size: 0.95rem;
-        color: #fbbf24;
-      }
-      .metrics {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 0.75rem;
-        margin-top: 1rem;
-      }
-      .metric-card {
-        background: rgba(14, 116, 144, 0.15);
-        border: 1px solid rgba(125, 211, 252, 0.25);
-        border-radius: 8px;
-        padding: 0.8rem;
-      }
-      .metric-card h2 {
-        margin: 0;
-        font-size: 0.75rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: #bae6fd;
-      }
-      .metric-card p {
-        margin: 0.4rem 0 0;
-        font-size: 1.1rem;
-        color: #f8fafc;
-      }
-      audio {
-        width: 100%;
-        margin-top: 1rem;
-        border-radius: 6px;
-        outline: none;
-      }
-      pre {
-        background: rgba(15, 23, 42, 0.6);
-        padding: 0.75rem;
-        border-radius: 8px;
-        border: 1px solid rgba(148, 163, 184, 0.25);
-        color: #cbd5f5;
-        overflow-x: auto;
-        font-size: 0.75rem;
-      }
+      :root { color-scheme: light dark; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+      body { margin:0; padding:1.5rem; background:#0f172a; color:#f8fafc; }
+      main { max-width:760px; margin:0 auto; border-radius:12px; padding:1.5rem; background:rgba(15,23,42,0.86); border:1px solid rgba(148,163,184,0.28); }
+      h1 { margin:0 0 0.6rem; font-size:1.6rem; letter-spacing:0.01em; }
+      p { margin:0 0 0.8rem; line-height:1.45; }
+      button { padding:0.55rem 1.35rem; border-radius:999px; border:none; font-weight:600; cursor:pointer; margin-right:0.5rem; transition:opacity 0.2s ease; }
+      button[disabled] { opacity:0.4; cursor:not-allowed; }
+      #connect { background:#22d3ee; color:#0f172a; }
+      #disconnect { background:transparent; color:#f8fafc; border:1px solid rgba(148,163,184,0.5); }
+      #startSpeaking { background:#fde68a; color:#1f2937; }
+      #stopSpeaking { background:#f97316; color:#0f172a; }
+      #status { margin:1rem 0; font-size:0.95rem; color:#fbbf24; }
+      audio { width:100%; margin-top:1rem; border-radius:6px; }
+      .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:0.75rem; margin-top:1rem; }
+      .metric-card { background:rgba(14,116,144,0.16); border:1px solid rgba(125,211,252,0.2); border-radius:8px; padding:0.75rem; }
+      .metric-card h2 { margin:0; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.08em; color:#bae6fd; }
+      .metric-card p { margin:0.35rem 0 0; font-size:1.05rem; color:#f8fafc; }
+      pre { background:rgba(15,23,42,0.6); padding:0.7rem; border-radius:8px; border:1px solid rgba(148,163,184,0.25); color:#cbd5f5; overflow-x:auto; font-size:0.75rem; margin-top:1rem; max-height:220px; }
+      .hidden { display:none; }
     </style>
   </head>
   <body>
     <main>
       <h1>Realtime Translator</h1>
-      <p>
-        Speak when the status shows <strong>Ready</strong>. The assistant replies in the target language.
-        Pause to let the server detect turn endings. Reconnect if audio stalls.
-      </p>
+      <p>This widget speaks back in your target language. It uses WebRTC for <code>gpt-realtime</code> and automatically falls back to a WebSocket relay for the mini model.</p>
       <div>
         <button id="connect">Connect</button>
         <button id="disconnect" disabled>Disconnect</button>
+        <button id="startSpeaking" class="hidden" disabled>Start Speaking</button>
+        <button id="stopSpeaking" class="hidden" disabled>Stop</button>
       </div>
       <div id="status">Idle. Click connect to start.</div>
       <audio id="remoteAudio" autoplay controls></audio>
       <div class="metrics">
-        <div class="metric-card">
-          <h2>Capture → Offer</h2>
-          <p id="metricCapture">–</p>
-        </div>
-        <div class="metric-card">
-          <h2>Offer → Answer</h2>
-          <p id="metricAnswer">–</p>
-        </div>
-        <div class="metric-card">
-          <h2>Answer → First Audio</h2>
-          <p id="metricPlayback">–</p>
-        </div>
+        <div class="metric-card"><h2>Capture → Commit</h2><p id="metricCapture">–</p></div>
+        <div class="metric-card"><h2>Commit → First Chunk</h2><p id="metricAnswer">–</p></div>
+        <div class="metric-card"><h2>First Chunk → Playback</h2><p id="metricPlayback">–</p></div>
       </div>
       <pre id="debug"></pre>
     </main>
     <script>
-      const statusEl = document.getElementById("status");
-      const debugEl = document.getElementById("debug");
-      const connectButton = document.getElementById("connect");
-      const disconnectButton = document.getElementById("disconnect");
-      const remoteAudio = document.getElementById("remoteAudio");
-      const metricCapture = document.getElementById("metricCapture");
-      const metricAnswer = document.getElementById("metricAnswer");
-      const metricPlayback = document.getElementById("metricPlayback");
+      const ui={status:document.getElementById("status"),debug:document.getElementById("debug"),connect:document.getElementById("connect"),disconnect:document.getElementById("disconnect"),start:document.getElementById("startSpeaking"),stop:document.getElementById("stopSpeaking"),audio:document.getElementById("remoteAudio"),metricCapture:document.getElementById("metricCapture"),metricAnswer:document.getElementById("metricAnswer"),metricPlayback:document.getElementById("metricPlayback")};
+      const WS_SAMPLE_RATE = 8000;
+      const query = new URLSearchParams(window.location.search);
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      let transport = (query.get("transport") || "webrtc").toLowerCase();
+      const model = (query.get("model") || "gpt-realtime").toLowerCase();
+      const sourceLang = query.get("source") || "en";
+      const targetLang = query.get("target") || "fr";
+      const voice = query.get("voice") || "verse";
+      let clientSecret = hash.get("token") || "";
+      const instruction = `You are a concise interpreter. Translate everything you hear from ${sourceLang.toUpperCase()} into ${targetLang.toUpperCase()}. Preserve tone and timing. Respond with speech only.`;
+      const state={rtcPc:undefined,rtcDc:undefined,rtcStream:undefined,rtcOffer:undefined,rtcAnswerTs:undefined,rtcTimer:undefined,wsSocket:undefined,wsStream:undefined,wsAudioContext:undefined,wsProcessor:undefined,wsRecording:false,wsRecordStart:undefined,wsCommitTs:undefined,wsFirstChunkTs:undefined,wsPcmChunks:[]};
 
-      const params = new URLSearchParams(window.location.search);
-      const fragmentParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-      let clientSecret = fragmentParams.get("token") || "";
-      const model = params.get("model") || "gpt-4o-realtime-preview";
-      const sourceLang = params.get("source") || "en";
-      const targetLang = params.get("target") || "fr";
-      const voice = params.get("voice") || "verse";
+      const postUpstream=(event,detail)=>{if(window.parent&&window.parent!==window){window.parent.postMessage({source:"realtime-widget",event,detail},"*");}};
+      const appendDebug=(entry)=>{const lines=ui.debug.textContent.split("\n").filter(Boolean);lines.push(`[${new Date().toLocaleTimeString()}] ${entry}`);ui.debug.textContent=lines.slice(-14).join("\n");};
+      const updateStatus=(message,highlight=false)=>{ui.status.textContent=message;ui.status.style.color=highlight?"#4ade80":"#fbbf24";postUpstream("status",{message,transport});};
+      const setMetrics=({captureCommit,commitFirstChunk,chunkPlayback})=>{const fmt=(value)=>typeof value==="number"&&Number.isFinite(value)?`${value.toFixed(0)} ms`:"–";ui.metricCapture.textContent=fmt(captureCommit);ui.metricAnswer.textContent=fmt(commitFirstChunk);ui.metricPlayback.textContent=fmt(chunkPlayback);postUpstream("metrics",{captureCommit,commitFirstChunk,chunkPlayback,transport});};
+      const resetMetrics=()=>setMetrics({captureCommit:undefined,commitFirstChunk:undefined,chunkPlayback:undefined});
 
-      let pc;
-      let dc;
-      let localStream;
-      let offerStartTs;
-      let answerReceivedTs;
-      let reconnectTimer;
+      const initUI = (initial = false) => {
+        const isWebRTC = transport === "webrtc";
+        ui.connect.textContent = isWebRTC ? "Connect (WebRTC)" : "Connect (WebSocket)";
+        ui.start.classList.toggle("hidden", isWebRTC);
+        ui.stop.classList.toggle("hidden", isWebRTC);
+        ui.start.disabled = true;
+        ui.stop.disabled = true;
+        if (!initial) appendDebug(`Switched UI to ${transport.toUpperCase()} mode.`);
+      };
 
-      function updateStatus(message, highlight = false) {
-        statusEl.textContent = message;
-        if (highlight) {
-          statusEl.style.color = "#4ade80";
-        } else {
-          statusEl.style.color = "#fbbf24";
-        }
-        postUpstream("status", { message });
-      }
-
-      function setMetrics({ captureOffer, offerAnswer, answerPlayback }) {
-        metricCapture.textContent = captureOffer ? `${captureOffer.toFixed(0)} ms` : "–";
-        metricAnswer.textContent = offerAnswer ? `${offerAnswer.toFixed(0)} ms` : "–";
-        metricPlayback.textContent = answerPlayback ? `${answerPlayback.toFixed(0)} ms` : "–";
-        postUpstream("metrics", { captureOffer, offerAnswer, answerPlayback });
-      }
-
-      function appendDebug(entry) {
-        const existing = debugEl.textContent.split("\n").filter(Boolean);
-        existing.push(`[${new Date().toLocaleTimeString()}] ${entry}`);
-        debugEl.textContent = existing.slice(-12).join("\n");
-      }
-
-      function postUpstream(event, detail) {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({ source: "realtime-widget", event, detail }, "*");
-        }
-      }
-
-      async function ensureToken() {
-        if (clientSecret) {
-          return clientSecret;
-        }
+      const ensureToken = async () => {
+        if (clientSecret) return clientSecret;
         const url = new URL("/realtime/token", window.location.origin);
         url.searchParams.set("model", model);
         url.searchParams.set("source_lang", sourceLang);
         url.searchParams.set("target_lang", targetLang);
-        const response = await fetch(url.toString(), { method: "GET" });
-        if (!response.ok) {
-          throw new Error(`Token request failed: ${response.status} ${await response.text()}`);
-        }
-        const payload = await response.json();
-        clientSecret = payload.client_secret;
-        window.location.hash = `token=${clientSecret}`;
+        url.searchParams.set("voice", voice);
+        const res = await fetch(url, { method: "GET" });
+        if (!res.ok) throw new Error(`Token request failed: ${res.status} ${await res.text()}`);
+        const payload = await res.json();
+        clientSecret = payload.client_secret || "";
+        if (clientSecret) window.location.hash = `token=${clientSecret}`;
         appendDebug("Fetched new realtime token.");
         return clientSecret;
-      }
+      };
 
-      async function connectRealtime() {
-        connectButton.disabled = true;
-        disconnectButton.disabled = false;
+      const teardownWebRTC = (showStatus) => {
+        clearTimeout(state.rtcTimer);
+        state.rtcTimer = undefined;
+        if (state.rtcDc) {
+          try { state.rtcDc.close(); } catch (err) { appendDebug(`Data channel close error: ${err.message}`); }
+        }
+        if (state.rtcPc) {
+          state.rtcPc.getSenders().forEach((sender) => sender.track?.stop());
+          state.rtcPc.close();
+        }
+        if (state.rtcStream) state.rtcStream.getTracks().forEach((track) => track.stop());
+        state.rtcDc = state.rtcPc = state.rtcStream = state.rtcOffer = state.rtcAnswerTs = undefined;
+        ui.connect.disabled = false;
+        ui.disconnect.disabled = true;
+        resetMetrics();
+        if (showStatus) updateStatus("Disconnected. Click connect to start again.");
+      };
+
+      const scheduleRtcReconnect = () => {
+        if (state.rtcTimer) return;
+        state.rtcTimer = setTimeout(() => {
+          appendDebug("Attempting automatic WebRTC reconnection.");
+          teardownWebRTC(false);
+          connectWebRTC().catch((err) => {
+            appendDebug(`Reconnect failed: ${err.message}`);
+            updateStatus(`Reconnect failed: ${err.message}`);
+          });
+        }, 2000);
+      };
+
+      const connectWebRTC = async () => {
+        ui.connect.disabled = true;
+        ui.disconnect.disabled = false;
         resetMetrics();
         updateStatus("Requesting microphone…");
-        appendDebug(`Connecting to model=${model}, source=${sourceLang}, target=${targetLang}, voice=${voice}`);
-
+        appendDebug(`Connecting via WebRTC (model=${model}, source=${sourceLang}, target=${targetLang}, voice=${voice})`);
         if (!navigator.mediaDevices?.getUserMedia) {
-          updateStatus("getUserMedia not supported in this browser.", false);
-          connectButton.disabled = false;
-          disconnectButton.disabled = true;
+          updateStatus("getUserMedia not supported in this browser.");
+          ui.connect.disabled = false;
+          ui.disconnect.disabled = true;
           return;
         }
-
-        localStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, sampleRate: 48000 },
-        });
-
+        state.rtcStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000 } });
         updateStatus("Preparing peer connection…");
-
-        pc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
-        dc = pc.createDataChannel("oai-events");
-
-        dc.onmessage = (event) => {
-          appendDebug(`Data channel message: ${event.data}`);
-        };
-
-        pc.oniceconnectionstatechange = () => {
-          appendDebug(`ICE state: ${pc.iceConnectionState}`);
-          if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
-            scheduleReconnect();
+        state.rtcPc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
+        state.rtcDc = state.rtcPc.createDataChannel("oai-events");
+        state.rtcDc.onmessage = (event) => appendDebug(`Data channel message: ${event.data}`);
+        state.rtcPc.oniceconnectionstatechange = () => {
+          appendDebug(`ICE state: ${state.rtcPc.iceConnectionState}`);
+          if (["disconnected", "failed"].includes(state.rtcPc.iceConnectionState)) {
+            scheduleRtcReconnect();
             updateStatus("Connection dropped. Reconnecting…");
           }
         };
-
-        pc.onconnectionstatechange = () => {
-          appendDebug(`Peer state: ${pc.connectionState}`);
-          if (pc.connectionState === "connected") {
+        state.rtcPc.onconnectionstatechange = () => {
+          appendDebug(`Peer state: ${state.rtcPc.connectionState}`);
+          if (state.rtcPc.connectionState === "connected") {
             updateStatus("Ready — speak now!", true);
-            clearTimeout(reconnectTimer);
+            clearTimeout(state.rtcTimer);
+            state.rtcTimer = undefined;
           }
         };
-
-        pc.ontrack = (event) => {
+        state.rtcPc.ontrack = (event) => {
           appendDebug("Remote track received.");
-          remoteAudio.srcObject = event.streams[0];
-          remoteAudio.play().catch(() => {
-            appendDebug("Autoplay blocked. User interaction needed.");
-          });
-          if (!answerReceivedTs) return;
-          const playbackDelta = performance.now() - answerReceivedTs;
-          const captureDelta = offerStartTs ? offerStartTs.captureDelta : undefined;
+          ui.audio.srcObject = event.streams[0];
+          ui.audio.play().catch(() => appendDebug("Autoplay blocked. User interaction needed."));
+          if (!state.rtcAnswerTs || !state.rtcOffer) return;
+          const playbackDelta = performance.now() - state.rtcAnswerTs;
           setMetrics({
-            captureOffer: offerStartTs?.captureDelta ?? undefined,
-            offerAnswer: offerStartTs?.answerDelta ?? undefined,
-            answerPlayback: playbackDelta,
+            captureCommit: state.rtcOffer.captureDelta,
+            commitFirstChunk: state.rtcOffer.answerDelta,
+            chunkPlayback: playbackDelta,
           });
         };
-
-        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-        const turnInstruction = JSON.stringify({
-          type: "session.update",
-          session: {
-            voice,
-            instructions: `Translate everything you hear from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}.`,
-          },
-        });
-
-        dc.onopen = () => {
+        state.rtcStream.getTracks().forEach((track) => state.rtcPc.addTrack(track, state.rtcStream));
+        const turnInstruction = JSON.stringify({ type: "session.update", session: { voice, instructions: instruction } });
+        state.rtcDc.onopen = () => {
           appendDebug("Data channel open, sending translation directive.");
-          dc.send(turnInstruction);
+          state.rtcDc.send(turnInstruction);
         };
-
-        const localOffer = await pc.createOffer();
-        offerStartTs = {
-          start: performance.now(),
-          captureDelta: undefined,
-          answerDelta: undefined,
-        };
-        await pc.setLocalDescription(localOffer);
-        offerStartTs.captureDelta = performance.now() - offerStartTs.start;
-        metricCapture.textContent = `${offerStartTs.captureDelta.toFixed(0)} ms`;
-
+        const localOffer = await state.rtcPc.createOffer();
+        state.rtcOffer = { start: performance.now(), captureDelta: undefined, answerDelta: undefined };
+        await state.rtcPc.setLocalDescription(localOffer);
+        state.rtcOffer.captureDelta = performance.now() - state.rtcOffer.start;
+        ui.metricCapture.textContent = `${state.rtcOffer.captureDelta.toFixed(0)} ms`;
         const token = await ensureToken();
         const realtimeUrl = `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`;
-
         updateStatus("Negotiating with OpenAI…");
-        const response = await fetch(realtimeUrl, {
+        const res = await fetch(realtimeUrl, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
@@ -294,96 +188,374 @@
           },
           body: localOffer.sdp,
         });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          appendDebug(`Realtime negotiate failed: ${errorText}`);
-          throw new Error(`Realtime negotiate failed: ${errorText}`);
+        if (!res.ok) {
+          const text = await res.text();
+          appendDebug(`Realtime negotiate failed: ${text || "(empty body)"}`);
+          if (res.status === 400 && !text.trim()) {
+            handleTransportFallback("This model declined WebRTC (transport mismatch). Switching to WebSocket.");
+            return;
+          }
+          throw new Error(`Realtime negotiate failed: ${text}`);
         }
-
-        const answerSdp = await response.text();
-        answerReceivedTs = performance.now();
-        offerStartTs.answerDelta = answerReceivedTs - offerStartTs.start;
-        metricAnswer.textContent = `${offerStartTs.answerDelta.toFixed(0)} ms`;
-
-        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+        const answer = await res.text();
+        state.rtcAnswerTs = performance.now();
+        state.rtcOffer.answerDelta = state.rtcAnswerTs - state.rtcOffer.start;
+        ui.metricAnswer.textContent = `${state.rtcOffer.answerDelta.toFixed(0)} ms`;
+        await state.rtcPc.setRemoteDescription({ type: "answer", sdp: answer });
         updateStatus("Streaming… speak when ready.", true);
-      }
+      };
 
-      function scheduleReconnect() {
-        if (reconnectTimer) return;
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          appendDebug("Attempting automatic reconnection.");
-          if (!clientSecret) {
-            clientSecret = "";
-          }
-          teardown().then(connectRealtime).catch((err) => {
-            appendDebug(`Reconnect failed: ${err.message}`);
-          });
-        }, 2000);
-      }
-
-      async function teardown() {
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
+      const teardownWebSocket = (showStatus) => {
+        if (state.wsProcessor) {
+          state.wsProcessor.disconnect();
+          state.wsProcessor.onaudioprocess = null;
         }
-        if (dc) {
+        state.wsProcessor = undefined;
+        if (state.wsAudioContext) state.wsAudioContext.close().catch(() => {});
+        state.wsAudioContext = undefined;
+        if (state.wsSocket && state.wsSocket.readyState === WebSocket.OPEN) state.wsSocket.close();
+        state.wsSocket = undefined;
+        state.wsRecording = false;
+        ui.start.disabled = true;
+        ui.stop.disabled = true;
+        ui.connect.disabled = false;
+        ui.disconnect.disabled = true;
+        resetMetrics();
+        if (showStatus) updateStatus("Disconnected. Click connect to start again.");
+      };
+
+      const connectWebSocket = async () => {
+        ui.connect.disabled = true;
+        ui.disconnect.disabled = false;
+        resetMetrics();
+        updateStatus("Initialising WebSocket relay…");
+        appendDebug(`Connecting via WebSocket relay (model=${model}, source=${sourceLang}, target=${targetLang}, voice=${voice})`);
+        if (!state.wsStream) {
           try {
-            dc.close();
+            state.wsStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000 } });
           } catch (err) {
-            appendDebug(`Data channel close error: ${err.message}`);
+            updateStatus(`Microphone error: ${err.message}`);
+            ui.connect.disabled = false;
+            ui.disconnect.disabled = true;
+            throw err;
           }
-          dc = null;
         }
-        if (pc) {
-          pc.getSenders().forEach((sender) => sender.track?.stop());
-          pc.close();
-          pc = null;
-        }
-        if (localStream) {
-          localStream.getTracks().forEach((track) => track.stop());
-          localStream = null;
-        }
-        answerReceivedTs = null;
-        offerStartTs = null;
-        updateStatus("Disconnected. Click connect to start again.");
-        setMetrics({ captureOffer: undefined, offerAnswer: undefined, answerPlayback: undefined });
-        connectButton.disabled = false;
-        disconnectButton.disabled = true;
-      }
+        const relayBase = window.location.origin.replace("http", "ws");
+        const relayUrl = new URL("/realtime/ws-relay", relayBase);
+        relayUrl.searchParams.set("model", model);
+        relayUrl.searchParams.set("source_lang", sourceLang);
+        relayUrl.searchParams.set("target_lang", targetLang);
+        relayUrl.searchParams.set("voice", voice);
+        state.wsSocket = new WebSocket(relayUrl.toString());
+        state.wsSocket.binaryType = "arraybuffer";
+        state.wsSocket.onopen = () => {
+          appendDebug("WebSocket relay connected.");
+          updateStatus("Relay connected. Click “Start Speaking” to stream audio.", true);
+          ui.start.disabled = false;
+        };
+        state.wsSocket.onmessage = (event) => {
+          if (typeof event.data === "string") {
+            try {
+              handleRelayPayload(JSON.parse(event.data));
+            } catch {
+              appendDebug(`Relay text: ${event.data}`);
+            }
+          } else if (event.data instanceof ArrayBuffer) {
+            handleAudioDelta({ audio: arrayBufferToBase64(event.data) });
+          }
+        };
+        state.wsSocket.onerror = (event) => {
+          appendDebug(`Relay error: ${event.message || "unknown"}`);
+          updateStatus("Relay error encountered. Check backend logs.");
+        };
+        state.wsSocket.onclose = () => {
+          appendDebug("Relay closed.");
+          updateStatus("Relay closed. Click connect to start again.");
+          ui.start.disabled = true;
+          ui.stop.disabled = true;
+          state.wsRecording = false;
+          state.wsSocket = undefined;
+        };
+      };
 
-      function resetMetrics() {
-        setMetrics({ captureOffer: undefined, offerAnswer: undefined, answerPlayback: undefined });
-      }
+      const handleRelayPayload = (payload) => {
+        if (!payload || typeof payload !== "object") return;
+        switch (payload.type) {
+          case "session.ready":
+            updateStatus("Relay ready. Start speaking when you are ready.", true);
+            ui.start.disabled = false;
+            break;
+          case "error":
+            appendDebug(`Upstream error: ${payload.message || JSON.stringify(payload)}`);
+            updateStatus(`Upstream error: ${payload.message || "unknown"}`);
+            break;
+          case "response.audio.delta":
+          case "response.output_audio.delta":
+          case "output_audio.delta":
+            handleAudioDelta(payload);
+            break;
+          case "response.delta":
+            if (payload.delta?.audio || payload.delta?.type === "audio") handleAudioDelta(payload.delta);
+            break;
+          case "response.completed":
+          case "response.done":
+            finalizeAudioPlayback();
+            break;
+          default:
+            appendDebug(`Relay message: ${JSON.stringify(payload)}`);
+        }
+      };
 
-      connectButton.addEventListener("click", async () => {
-        try {
-          await connectRealtime();
-        } catch (err) {
+      const sendRelayMessage = (payload) => {
+        if (state.wsSocket?.readyState === WebSocket.OPEN) state.wsSocket.send(JSON.stringify(payload));
+      };
+
+      const startStreamingWebSocket = async () => {
+        if (!state.wsSocket || state.wsSocket.readyState !== WebSocket.OPEN) {
+          updateStatus("Relay not ready yet.");
+          return;
+        }
+        resetMetrics();
+        state.wsPcmChunks.length = 0;
+        state.wsRecording = true;
+        state.wsRecordStart = performance.now();
+        state.wsCommitTs = state.wsFirstChunkTs = undefined;
+        ui.start.disabled = true;
+        ui.stop.disabled = false;
+        updateStatus("Capturing audio…");
+        appendDebug("Streaming microphone samples to relay.");
+        if (!state.wsAudioContext) state.wsAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = state.wsAudioContext.createMediaStreamSource(state.wsStream);
+        state.wsProcessor = state.wsAudioContext.createScriptProcessor(4096, 1, 1);
+        source.connect(state.wsProcessor);
+        state.wsProcessor.connect(state.wsAudioContext.destination);
+        state.wsProcessor.onaudioprocess = (event) => {
+          if (!state.wsRecording) return;
+          const input = event.inputBuffer.getChannelData(0);
+          const downsampled = downsampleBuffer(input, state.wsAudioContext.sampleRate, WS_SAMPLE_RATE);
+          if (!downsampled.length) return;
+          const pcm = floatTo16BitPCM(downsampled);
+          sendRelayMessage({ type: "input_audio_buffer.append", audio: arrayBufferToBase64(pcm) });
+        };
+        sendRelayMessage({ type: "input_audio_buffer.clear" });
+      };
+
+      const stopStreamingWebSocket = async () => {
+        if (!state.wsRecording) return;
+        state.wsRecording = false;
+        state.wsCommitTs = performance.now();
+        ui.start.disabled = false;
+        ui.stop.disabled = true;
+        updateStatus("Processing translation…");
+        appendDebug("Committing audio buffer and requesting response.");
+        if (state.wsProcessor) {
+          state.wsProcessor.disconnect();
+          state.wsProcessor.onaudioprocess = null;
+          state.wsProcessor = undefined;
+        }
+        sendRelayMessage({ type: "input_audio_buffer.commit" });
+        sendRelayMessage({
+          type: "response.create",
+          response: { modalities: ["audio"], instructions: instruction, audio: { voice, format: "wav" } },
+        });
+        if (state.wsRecordStart) {
+          setMetrics({
+            captureCommit: state.wsCommitTs - state.wsRecordStart,
+            commitFirstChunk: undefined,
+            chunkPlayback: undefined,
+          });
+        }
+      };
+
+      const handleAudioDelta = (payload) => {
+        const base64 =
+          payload?.audio?.data ||
+          payload?.delta ||
+          payload?.delta?.audio?.data ||
+          payload?.data ||
+          payload?.audio;
+        if (!base64) {
+          appendDebug(`Unhandled delta payload: ${JSON.stringify(payload)}`);
+          return;
+        }
+        const muLawBytes = base64ToUint8Array(base64);
+        state.wsPcmChunks.push(muLawDecode(muLawBytes));
+        if (!state.wsFirstChunkTs) {
+          state.wsFirstChunkTs = performance.now();
+          const commitFirstChunk = state.wsCommitTs ? state.wsFirstChunkTs - state.wsCommitTs : undefined;
+          const captureCommit = state.wsCommitTs && state.wsRecordStart ? state.wsCommitTs - state.wsRecordStart : undefined;
+          setMetrics({ captureCommit, commitFirstChunk, chunkPlayback: undefined });
+        }
+      };
+
+      const finalizeAudioPlayback = () => {
+        if (!state.wsPcmChunks.length) {
+          appendDebug("Response completed with no audio chunks.");
+          return;
+        }
+        const combinedPcm = concatInt16Chunks(state.wsPcmChunks);
+        state.wsPcmChunks.length = 0;
+        const wavBuffer = encodeWavFromInt16(combinedPcm, WS_SAMPLE_RATE);
+        const blob = new Blob([wavBuffer], { type: "audio/wav" });
+        ui.audio.srcObject = null;
+        ui.audio.src = URL.createObjectURL(blob);
+        ui.audio.play().catch(() => appendDebug("Autoplay blocked. Tap play to listen."));
+        const playbackDelta = state.wsFirstChunkTs ? performance.now() - state.wsFirstChunkTs : undefined;
+        const captureCommit = state.wsCommitTs && state.wsRecordStart ? state.wsCommitTs - state.wsRecordStart : undefined;
+        const commitFirstChunk = state.wsFirstChunkTs && state.wsCommitTs ? state.wsFirstChunkTs - state.wsCommitTs : undefined;
+        setMetrics({ captureCommit, commitFirstChunk, chunkPlayback: playbackDelta });
+        updateStatus("Playback ready. Tap play if the browser paused it.");
+      };
+
+      const handleTransportFallback = (reason) => {
+        appendDebug(reason);
+        updateStatus(reason);
+        postUpstream("transport-fallback", { reason, target: "websocket" });
+        transport = "websocket";
+        query.set("transport", "websocket");
+        window.history.replaceState({}, "", `${window.location.pathname}?${query.toString()}${window.location.hash}`);
+        initUI();
+        teardownWebRTC(false);
+        connectWebSocket().catch((err) => {
+          appendDebug(`Fallback connection failed: ${err.message}`);
+          updateStatus(`Fallback failed: ${err.message}`);
+        });
+      };
+
+      const downsampleBuffer = (buffer, inRate, outRate) => {
+        if (outRate === inRate) return buffer;
+        const ratio = inRate / outRate;
+        const length = Math.round(buffer.length / ratio);
+        const result = new Float32Array(length);
+        let offsetResult = 0;
+        let offsetBuffer = 0;
+        while (offsetResult < length) {
+          const nextOffset = Math.round((offsetResult + 1) * ratio);
+          let accum = 0;
+          let count = 0;
+          for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i += 1) {
+            accum += buffer[i];
+            count += 1;
+          }
+          result[offsetResult] = count ? accum / count : 0;
+          offsetResult += 1;
+          offsetBuffer = nextOffset;
+        }
+        return result;
+      };
+
+      const floatTo16BitPCM = (float32) => {
+        const buffer = new ArrayBuffer(float32.length * 2);
+        const view = new DataView(buffer);
+        for (let i = 0; i < float32.length; i += 1) {
+          let s = Math.max(-1, Math.min(1, float32[i]));
+          view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        }
+        return buffer;
+      };
+
+      const arrayBufferToBase64 = (buffer) => {
+        let binary = "";
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.byteLength; i += 1) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary);
+      };
+
+      const base64ToUint8Array = (base64) => {
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i += 1) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      };
+
+      const concatInt16Chunks = (chunks) => {
+        const total = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        const result = new Int16Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          result.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return result;
+      };
+      const muLawDecode = (uint8) => {
+        const out = new Int16Array(uint8.length);
+        for (let i = 0; i < uint8.length; i += 1) {
+          out[i] = muLawDecodeSample(uint8[i]);
+        }
+        return out;
+      };
+      const muLawDecodeSample = (value) => {
+        const MULAW_BIAS = 0x84;
+        let sample = ~value & 0xff;
+        const sign = sample & 0x80;
+        let exponent = (sample >> 4) & 0x07;
+        let mantissa = sample & 0x0f;
+        let magnitude = ((mantissa << 4) + MULAW_BIAS) << exponent;
+        magnitude -= MULAW_BIAS;
+        const sample16 = sign ? -magnitude : magnitude;
+        return Math.max(-32768, Math.min(32767, sample16));
+      };
+      const encodeWavFromInt16 = (pcm, sampleRate) => {
+        const buffer = new ArrayBuffer(44 + pcm.length * 2);
+        const view = new DataView(buffer);
+        const writeString = (offset, str) => {
+          for (let i = 0; i < str.length; i += 1) view.setUint8(offset + i, str.charCodeAt(i));
+        };
+        writeString(0, "RIFF");
+        view.setUint32(4, 36 + pcm.length * 2, true);
+        writeString(8, "WAVE");
+        writeString(12, "fmt ");
+        view.setUint32(16, 16, true); // PCM chunk size
+        view.setUint16(20, 1, true); // audio format PCM
+        view.setUint16(22, 1, true); // channels
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true); // byte rate
+        view.setUint16(32, 2, true); // block align
+        view.setUint16(34, 16, true); // bits per sample
+        writeString(36, "data");
+        view.setUint32(40, pcm.length * 2, true);
+        let offset = 44;
+        for (let i = 0; i < pcm.length; i += 1) {
+          view.setInt16(offset, pcm[i], true);
+          offset += 2;
+        }
+        return buffer;
+      };
+
+      ui.connect.addEventListener("click", () => {
+        if (transport === "webrtc") connectWebRTC().catch((err) => {
           appendDebug(err.message);
-          updateStatus(err.message);
-          connectButton.disabled = false;
-          disconnectButton.disabled = true;
-        }
+          updateStatus(`Connect failed: ${err.message}`);
+          ui.connect.disabled = false;
+          ui.disconnect.disabled = true;
+        });
+        else connectWebSocket().catch((err) => {
+          appendDebug(err.message);
+          updateStatus(`Connect failed: ${err.message}`);
+          ui.connect.disabled = false;
+          ui.disconnect.disabled = true;
+        });
       });
-
-      disconnectButton.addEventListener("click", () => {
-        teardown();
+      ui.disconnect.addEventListener("click", () => {
+        transport === "webrtc" ? teardownWebRTC(true) : teardownWebSocket(true);
         appendDebug("Disconnected by user.");
       });
-
+      ui.start.addEventListener("click", () => startStreamingWebSocket().catch((err) => {
+        appendDebug(`Failed to start streaming: ${err.message}`);
+        updateStatus(`Recording error: ${err.message}`);
+      }));
+      ui.stop.addEventListener("click", () => stopStreamingWebSocket().catch((err) => {
+        appendDebug(`Failed to stop streaming: ${err.message}`);
+        updateStatus(`Stop error: ${err.message}`);
+      }));
       window.addEventListener("beforeunload", () => {
-        teardown();
+        teardownWebRTC(false);
+        teardownWebSocket(false);
       });
 
-      window.addEventListener("message", (event) => {
-        if (event.data?.event === "refresh-token") {
-          clientSecret = event.data?.token || "";
-          appendDebug("Token refreshed via parent frame.");
-        }
-      });
+      initUI(true);
     </script>
   </body>
 </html>
