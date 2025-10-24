@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Realtime Translator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 1.5rem;
+        background: #0f172a;
+        color: #f8fafc;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        border-radius: 12px;
+        padding: 1.5rem;
+        background: rgba(15, 23, 42, 0.82);
+        border: 1px solid rgba(148, 163, 184, 0.3);
+      }
+      h1 {
+        margin-top: 0;
+        font-size: 1.6rem;
+        letter-spacing: 0.01em;
+      }
+      button {
+        padding: 0.6rem 1.4rem;
+        border-radius: 999px;
+        border: none;
+        font-weight: 600;
+        cursor: pointer;
+        margin-right: 0.5rem;
+      }
+      button[disabled] {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      #connect {
+        background: #22d3ee;
+        color: #0f172a;
+      }
+      #disconnect {
+        background: transparent;
+        color: #f8fafc;
+        border: 1px solid rgba(148, 163, 184, 0.5);
+      }
+      #status {
+        margin: 1rem 0;
+        font-size: 0.95rem;
+        color: #fbbf24;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+      .metric-card {
+        background: rgba(14, 116, 144, 0.15);
+        border: 1px solid rgba(125, 211, 252, 0.25);
+        border-radius: 8px;
+        padding: 0.8rem;
+      }
+      .metric-card h2 {
+        margin: 0;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #bae6fd;
+      }
+      .metric-card p {
+        margin: 0.4rem 0 0;
+        font-size: 1.1rem;
+        color: #f8fafc;
+      }
+      audio {
+        width: 100%;
+        margin-top: 1rem;
+        border-radius: 6px;
+        outline: none;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.6);
+        padding: 0.75rem;
+        border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        color: #cbd5f5;
+        overflow-x: auto;
+        font-size: 0.75rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Realtime Translator</h1>
+      <p>
+        Speak when the status shows <strong>Ready</strong>. The assistant replies in the target language.
+        Pause to let the server detect turn endings. Reconnect if audio stalls.
+      </p>
+      <div>
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+      </div>
+      <div id="status">Idle. Click connect to start.</div>
+      <audio id="remoteAudio" autoplay controls></audio>
+      <div class="metrics">
+        <div class="metric-card">
+          <h2>Capture → Offer</h2>
+          <p id="metricCapture">–</p>
+        </div>
+        <div class="metric-card">
+          <h2>Offer → Answer</h2>
+          <p id="metricAnswer">–</p>
+        </div>
+        <div class="metric-card">
+          <h2>Answer → First Audio</h2>
+          <p id="metricPlayback">–</p>
+        </div>
+      </div>
+      <pre id="debug"></pre>
+    </main>
+    <script>
+      const statusEl = document.getElementById("status");
+      const debugEl = document.getElementById("debug");
+      const connectButton = document.getElementById("connect");
+      const disconnectButton = document.getElementById("disconnect");
+      const remoteAudio = document.getElementById("remoteAudio");
+      const metricCapture = document.getElementById("metricCapture");
+      const metricAnswer = document.getElementById("metricAnswer");
+      const metricPlayback = document.getElementById("metricPlayback");
+
+      const params = new URLSearchParams(window.location.search);
+      const fragmentParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      let clientSecret = fragmentParams.get("token") || "";
+      const model = params.get("model") || "gpt-4o-realtime-preview";
+      const sourceLang = params.get("source") || "en";
+      const targetLang = params.get("target") || "fr";
+      const voice = params.get("voice") || "verse";
+
+      let pc;
+      let dc;
+      let localStream;
+      let offerStartTs;
+      let answerReceivedTs;
+      let reconnectTimer;
+
+      function updateStatus(message, highlight = false) {
+        statusEl.textContent = message;
+        if (highlight) {
+          statusEl.style.color = "#4ade80";
+        } else {
+          statusEl.style.color = "#fbbf24";
+        }
+        postUpstream("status", { message });
+      }
+
+      function setMetrics({ captureOffer, offerAnswer, answerPlayback }) {
+        metricCapture.textContent = captureOffer ? `${captureOffer.toFixed(0)} ms` : "–";
+        metricAnswer.textContent = offerAnswer ? `${offerAnswer.toFixed(0)} ms` : "–";
+        metricPlayback.textContent = answerPlayback ? `${answerPlayback.toFixed(0)} ms` : "–";
+        postUpstream("metrics", { captureOffer, offerAnswer, answerPlayback });
+      }
+
+      function appendDebug(entry) {
+        const existing = debugEl.textContent.split("\n").filter(Boolean);
+        existing.push(`[${new Date().toLocaleTimeString()}] ${entry}`);
+        debugEl.textContent = existing.slice(-12).join("\n");
+      }
+
+      function postUpstream(event, detail) {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ source: "realtime-widget", event, detail }, "*");
+        }
+      }
+
+      async function ensureToken() {
+        if (clientSecret) {
+          return clientSecret;
+        }
+        const url = new URL("/realtime/token", window.location.origin);
+        url.searchParams.set("model", model);
+        url.searchParams.set("source_lang", sourceLang);
+        url.searchParams.set("target_lang", targetLang);
+        const response = await fetch(url.toString(), { method: "GET" });
+        if (!response.ok) {
+          throw new Error(`Token request failed: ${response.status} ${await response.text()}`);
+        }
+        const payload = await response.json();
+        clientSecret = payload.client_secret;
+        window.location.hash = `token=${clientSecret}`;
+        appendDebug("Fetched new realtime token.");
+        return clientSecret;
+      }
+
+      async function connectRealtime() {
+        connectButton.disabled = true;
+        disconnectButton.disabled = false;
+        resetMetrics();
+        updateStatus("Requesting microphone…");
+        appendDebug(`Connecting to model=${model}, source=${sourceLang}, target=${targetLang}, voice=${voice}`);
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          updateStatus("getUserMedia not supported in this browser.", false);
+          connectButton.disabled = false;
+          disconnectButton.disabled = true;
+          return;
+        }
+
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, sampleRate: 48000 },
+        });
+
+        updateStatus("Preparing peer connection…");
+
+        pc = new RTCPeerConnection({ iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] });
+        dc = pc.createDataChannel("oai-events");
+
+        dc.onmessage = (event) => {
+          appendDebug(`Data channel message: ${event.data}`);
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          appendDebug(`ICE state: ${pc.iceConnectionState}`);
+          if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
+            scheduleReconnect();
+            updateStatus("Connection dropped. Reconnecting…");
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          appendDebug(`Peer state: ${pc.connectionState}`);
+          if (pc.connectionState === "connected") {
+            updateStatus("Ready — speak now!", true);
+            clearTimeout(reconnectTimer);
+          }
+        };
+
+        pc.ontrack = (event) => {
+          appendDebug("Remote track received.");
+          remoteAudio.srcObject = event.streams[0];
+          remoteAudio.play().catch(() => {
+            appendDebug("Autoplay blocked. User interaction needed.");
+          });
+          if (!answerReceivedTs) return;
+          const playbackDelta = performance.now() - answerReceivedTs;
+          const captureDelta = offerStartTs ? offerStartTs.captureDelta : undefined;
+          setMetrics({
+            captureOffer: offerStartTs?.captureDelta ?? undefined,
+            offerAnswer: offerStartTs?.answerDelta ?? undefined,
+            answerPlayback: playbackDelta,
+          });
+        };
+
+        localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+        const turnInstruction = JSON.stringify({
+          type: "session.update",
+          session: {
+            voice,
+            instructions: `Translate everything you hear from ${sourceLang.toUpperCase()} to ${targetLang.toUpperCase()}.`,
+          },
+        });
+
+        dc.onopen = () => {
+          appendDebug("Data channel open, sending translation directive.");
+          dc.send(turnInstruction);
+        };
+
+        const localOffer = await pc.createOffer();
+        offerStartTs = {
+          start: performance.now(),
+          captureDelta: undefined,
+          answerDelta: undefined,
+        };
+        await pc.setLocalDescription(localOffer);
+        offerStartTs.captureDelta = performance.now() - offerStartTs.start;
+        metricCapture.textContent = `${offerStartTs.captureDelta.toFixed(0)} ms`;
+
+        const token = await ensureToken();
+        const realtimeUrl = `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`;
+
+        updateStatus("Negotiating with OpenAI…");
+        const response = await fetch(realtimeUrl, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/sdp",
+            "OpenAI-Beta": "realtime=v1",
+          },
+          body: localOffer.sdp,
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          appendDebug(`Realtime negotiate failed: ${errorText}`);
+          throw new Error(`Realtime negotiate failed: ${errorText}`);
+        }
+
+        const answerSdp = await response.text();
+        answerReceivedTs = performance.now();
+        offerStartTs.answerDelta = answerReceivedTs - offerStartTs.start;
+        metricAnswer.textContent = `${offerStartTs.answerDelta.toFixed(0)} ms`;
+
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+        updateStatus("Streaming… speak when ready.", true);
+      }
+
+      function scheduleReconnect() {
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          appendDebug("Attempting automatic reconnection.");
+          if (!clientSecret) {
+            clientSecret = "";
+          }
+          teardown().then(connectRealtime).catch((err) => {
+            appendDebug(`Reconnect failed: ${err.message}`);
+          });
+        }, 2000);
+      }
+
+      async function teardown() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        if (dc) {
+          try {
+            dc.close();
+          } catch (err) {
+            appendDebug(`Data channel close error: ${err.message}`);
+          }
+          dc = null;
+        }
+        if (pc) {
+          pc.getSenders().forEach((sender) => sender.track?.stop());
+          pc.close();
+          pc = null;
+        }
+        if (localStream) {
+          localStream.getTracks().forEach((track) => track.stop());
+          localStream = null;
+        }
+        answerReceivedTs = null;
+        offerStartTs = null;
+        updateStatus("Disconnected. Click connect to start again.");
+        setMetrics({ captureOffer: undefined, offerAnswer: undefined, answerPlayback: undefined });
+        connectButton.disabled = false;
+        disconnectButton.disabled = true;
+      }
+
+      function resetMetrics() {
+        setMetrics({ captureOffer: undefined, offerAnswer: undefined, answerPlayback: undefined });
+      }
+
+      connectButton.addEventListener("click", async () => {
+        try {
+          await connectRealtime();
+        } catch (err) {
+          appendDebug(err.message);
+          updateStatus(err.message);
+          connectButton.disabled = false;
+          disconnectButton.disabled = true;
+        }
+      });
+
+      disconnectButton.addEventListener("click", () => {
+        teardown();
+        appendDebug("Disconnected by user.");
+      });
+
+      window.addEventListener("beforeunload", () => {
+        teardown();
+      });
+
+      window.addEventListener("message", (event) => {
+        if (event.data?.event === "refresh-token") {
+          clientSecret = event.data?.token || "";
+          appendDebug("Token refreshed via parent frame.");
+        }
+      });
+    </script>
+  </body>
+</html>
